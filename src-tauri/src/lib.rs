@@ -2,11 +2,10 @@ use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, WebviewWindowBuilder,
+    Emitter, Manager, UserAttentionType, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-/// App state: edit mode vs pass-through mode
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum OverlayMode {
     Edit,
@@ -14,14 +13,20 @@ pub enum OverlayMode {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
+#[serde(default)]
 pub struct AppSettings {
     pub text: String,
     pub pos_x: f64,
     pub pos_y: f64,
     pub bg_alpha: f64,
+    pub bg_color: String,
     pub font_size: u32,
     pub font_color: String,
     pub hotkey: String,
+    pub text_stroke: bool,
+    pub show_in_dock: bool,
+    pub text_flash_interval_seconds: u32,
+    pub show_first_paragraph: bool,
 }
 
 impl Default for AppSettings {
@@ -31,9 +36,14 @@ impl Default for AppSettings {
             pos_x: 100.0,
             pos_y: 100.0,
             bg_alpha: 0.3,
+            bg_color: String::from("#fffaf0"),
             font_size: 16,
-            font_color: String::from("#ffffff"),
+            font_color: String::from("#000000"),
             hotkey: String::from("Alt+Command+E"),
+            text_stroke: true,
+            show_in_dock: false,
+            text_flash_interval_seconds: 300,
+            show_first_paragraph: false,
         }
     }
 }
@@ -41,33 +51,183 @@ impl Default for AppSettings {
 pub struct AppState {
     pub mode: Mutex<OverlayMode>,
     pub settings: Mutex<AppSettings>,
+    pub mouse_in_overlay: Mutex<bool>,
 }
 
 fn settings_path(app: &tauri::AppHandle) -> std::path::PathBuf {
     let dir = app.path().app_data_dir().unwrap_or_else(|_| {
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join(".n-top")
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".n-top")
     });
     let _ = std::fs::create_dir_all(&dir);
     dir.join("content.json")
 }
 
-fn load_settings(app: &tauri::AppHandle) -> AppSettings {
-    let path = settings_path(app);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+fn history_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    let dir = app.path().app_data_dir().unwrap_or_else(|_| {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".n-top")
+    });
+    let history = dir.join("history");
+    let _ = std::fs::create_dir_all(&history);
+    history
 }
 
-fn save_settings(app: &tauri::AppHandle, settings: &AppSettings) {
-    let path = settings_path(app);
+fn save_history_snapshot(app: &tauri::AppHandle, settings: &AppSettings) {
+    let dir = history_dir(app);
+
+    // Check if the latest snapshot has identical text — skip if so
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut files: Vec<_> = entries
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        files.sort();
+        files.reverse();
+        if let Some(latest) = files.first() {
+            let latest_path = dir.join(latest);
+            if let Ok(latest_json) = std::fs::read_to_string(&latest_path) {
+                if let Ok(latest_settings) = serde_json::from_str::<AppSettings>(&latest_json) {
+                    if latest_settings.text == settings.text {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    let now = chrono::Local::now();
+    let filename = format!("{}.json", now.format("%Y-%m-%d_%H-%M-%S"));
+    let path = dir.join(&filename);
     if let Ok(json) = serde_json::to_string_pretty(settings) {
         let _ = std::fs::write(&path, json);
     }
 }
 
-/// Switch overlay between Edit and PassThrough mode.
+fn cleanup_old_history(app: &tauri::AppHandle) {
+    let dir = history_dir(app);
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Keep only today's files
+            if !name.starts_with(&today) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+fn load_settings(app: &tauri::AppHandle) -> AppSettings {
+    let path = settings_path(app);
+    let backup_path = path.with_extension("json.bak");
+
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        if let Ok(settings) = serde_json::from_str::<AppSettings>(&contents) {
+            return settings;
+        }
+    }
+
+    if let Ok(contents) = std::fs::read_to_string(&backup_path) {
+        if let Ok(settings) = serde_json::from_str::<AppSettings>(&contents) {
+            return settings;
+        }
+    }
+
+    AppSettings::default()
+}
+
+fn save_settings(app: &tauri::AppHandle, settings: &AppSettings) {
+    let path = settings_path(app);
+    let backup_path = path.with_extension("json.bak");
+    let temp_path = path.with_extension("json.tmp");
+
+    let Ok(json) = serde_json::to_string_pretty(settings) else {
+        return;
+    };
+
+    if std::fs::write(&temp_path, json).is_err() {
+        return;
+    }
+
+    if path.exists() {
+        let _ = std::fs::copy(&path, &backup_path);
+    }
+
+    let _ = std::fs::rename(&temp_path, &path);
+}
+
+fn save_overlay_position(app: &tauri::AppHandle, position: tauri::PhysicalPosition<i32>) {
+    let state = app.state::<AppState>();
+    let mut settings = state.settings.lock().unwrap();
+    settings.pos_x = f64::from(position.x);
+    settings.pos_y = f64::from(position.y);
+    save_settings(app, &settings);
+}
+
+/// Get current mouse cursor position via core-graphics
+fn get_mouse_position() -> Option<(f64, f64)> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+    let event = CGEvent::new(source).ok()?;
+    let point = event.location();
+    Some((point.x, point.y))
+}
+
+/// Check if a point is inside the overlay window bounds
+fn is_point_in_overlay(app: &tauri::AppHandle, px: f64, py: f64) -> bool {
+    let Some(window) = app.get_webview_window("overlay") else {
+        return false;
+    };
+    let Ok(pos) = window.outer_position() else {
+        return false;
+    };
+    let Ok(size) = window.outer_size() else {
+        return false;
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    // CGEvent returns logical pixels; Tauri returns physical pixels.
+    // Convert mouse coords to physical pixels to match window coords.
+    let px = px * scale;
+    let py = py * scale;
+    let x = pos.x as f64;
+    let y = pos.y as f64;
+    let w = size.width as f64;
+    let h = size.height as f64;
+    px >= x && px <= x + w && py >= y && py <= y + h
+}
+
+/// Start a background thread that polls mouse position when in pass-through mode
+fn start_mouse_poll(app: tauri::AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let state = app.state::<AppState>();
+        let mode = *state.mode.lock().unwrap();
+
+        if mode != OverlayMode::PassThrough {
+            // In edit mode, always visible
+            let mut in_overlay = state.mouse_in_overlay.lock().unwrap();
+            if *in_overlay {
+                *in_overlay = false;
+                let _ = app.emit("mouse-hover", false);
+            }
+            continue;
+        }
+
+        // Pass-through mode: check if mouse is over the overlay
+        let Some((mx, my)) = get_mouse_position() else {
+            continue;
+        };
+        let in_overlay = is_point_in_overlay(&app, mx, my);
+
+        let mut current = state.mouse_in_overlay.lock().unwrap();
+        if *current != in_overlay {
+            *current = in_overlay;
+            let _ = app.emit("mouse-hover", in_overlay);
+        }
+    });
+}
+
 fn set_mode(app: &tauri::AppHandle, mode: OverlayMode) {
     let state = app.state::<AppState>();
     *state.mode.lock().unwrap() = mode;
@@ -77,17 +237,16 @@ fn set_mode(app: &tauri::AppHandle, mode: OverlayMode) {
             OverlayMode::Edit => {
                 let _ = window.set_ignore_cursor_events(false);
                 let _ = window.set_focus();
-                let _ = window.emit("mode-changed", "edit");
+                let _ = app.emit("mode-changed", "edit");
             }
             OverlayMode::PassThrough => {
                 let _ = window.set_ignore_cursor_events(true);
-                let _ = window.emit("mode-changed", "pass-through");
+                let _ = app.emit("mode-changed", "pass-through");
             }
         }
     }
 }
 
-/// Toggle between edit and pass-through.
 fn toggle_mode(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     let current = *state.mode.lock().unwrap();
@@ -98,10 +257,13 @@ fn toggle_mode(app: &tauri::AppHandle) {
     set_mode(app, next);
 }
 
-/// Show the control panel window (create if not exists).
 fn show_control_panel(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("control-panel") {
+        let _ = app.show();
+        let _ = window.unminimize();
         let _ = window.show();
+        let _ = window.set_always_on_top(true);
+        let _ = window.request_user_attention(Some(UserAttentionType::Critical));
         let _ = window.set_focus();
     } else {
         let _ = WebviewWindowBuilder::new(
@@ -110,9 +272,35 @@ fn show_control_panel(app: &tauri::AppHandle) {
             tauri::WebviewUrl::App("index.html#/control-panel".into()),
         )
         .title("N-Top 控制面板")
-        .inner_size(300.0, 360.0)
-        .resizable(false)
+        .inner_size(320.0, 840.0)
+        .min_inner_size(320.0, 840.0)
+        .resizable(true)
         .decorations(true)
+        .always_on_top(true)
+        .visible(true)
+        .build();
+    }
+}
+
+fn show_history_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("history") {
+        let _ = app.show();
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_always_on_top(true);
+        let _ = window.request_user_attention(Some(UserAttentionType::Critical));
+        let _ = window.set_focus();
+    } else {
+        let _ = WebviewWindowBuilder::new(
+            app,
+            "history",
+            tauri::WebviewUrl::App("index.html#/history".into()),
+        )
+        .title("N-Top 历史记录")
+        .inner_size(360.0, 480.0)
+        .resizable(true)
+        .decorations(true)
+        .always_on_top(true)
         .visible(true)
         .build();
     }
@@ -128,10 +316,23 @@ fn get_settings(app: tauri::AppHandle) -> AppSettings {
 #[tauri::command]
 fn save_settings_cmd(app: tauri::AppHandle, settings: AppSettings) {
     let state = app.state::<AppState>();
+    let old_hotkey = state.settings.lock().unwrap().hotkey.clone();
+    let hotkey_changed = old_hotkey != settings.hotkey;
+
     *state.settings.lock().unwrap() = settings.clone();
     save_settings(&app, &settings);
+    save_history_snapshot(&app, &settings);
 
-    // Apply visual settings to overlay
+    // Re-register global hotkey if it changed
+    if hotkey_changed {
+        // Unregister all existing shortcuts
+        let _ = app.global_shortcut().unregister_all();
+        // Register new hotkey
+        if let Err(e) = register_hotkey(&app, &settings.hotkey) {
+            eprintln!("热键重新注册失败: {}", e);
+        }
+    }
+
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.emit("settings-updated", &settings);
     }
@@ -163,6 +364,76 @@ fn get_mode(app: tauri::AppHandle) -> String {
     }
 }
 
+#[tauri::command]
+fn is_mouse_in_overlay(app: tauri::AppHandle) -> bool {
+    let Some((mx, my)) = get_mouse_position() else {
+        return false;
+    };
+    is_point_in_overlay(&app, mx, my)
+}
+
+#[derive(serde::Serialize)]
+struct HistoryEntry {
+    filename: String,
+    timestamp: String,
+    text: String,
+}
+
+#[tauri::command]
+fn get_history(app: tauri::AppHandle) -> Vec<HistoryEntry> {
+    let dir = history_dir(&app);
+    cleanup_old_history(&app);
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut entries: Vec<HistoryEntry> = Vec::new();
+
+    if let Ok(read_dir) = std::fs::read_dir(&dir) {
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(&today) || !name.ends_with(".json") {
+                continue;
+            }
+            // Extract timestamp from filename: YYYY-MM-DD_HH-MM-SS.json
+            let ts = name.trim_end_matches(".json").to_string();
+            // Parse display: "YYYY:MM:DD HH:MM:SS" → "HH:MM:SS"
+            let time_part = ts.split('_').nth(1).unwrap_or("").replace("-", ":");
+            let display = format!("{} {}", ts.split('_').next().unwrap_or(""), time_part);
+
+            let text = std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|s| serde_json::from_str::<AppSettings>(&s).ok())
+                .map(|s| s.text)
+                .unwrap_or_default();
+
+            entries.push(HistoryEntry {
+                filename: name,
+                timestamp: display,
+                text,
+            });
+        }
+    }
+
+    // Sort by filename descending (newest first)
+    entries.sort_by(|a, b| b.filename.cmp(&a.filename));
+    entries
+}
+
+#[tauri::command]
+fn set_dock_visibility(app: tauri::AppHandle, visible: bool) {
+    use tauri::ActivationPolicy;
+    let policy = if visible {
+        ActivationPolicy::Regular
+    } else {
+        ActivationPolicy::Accessory
+    };
+    let _ = app.set_activation_policy(policy);
+
+    // Persist to settings
+    let state = app.state::<AppState>();
+    let mut settings = state.settings.lock().unwrap();
+    settings.show_in_dock = visible;
+    save_settings(&app, &settings);
+}
+
 fn register_hotkey(app: &tauri::AppHandle, hotkey_str: &str) -> Result<(), String> {
     let shortcut: Shortcut = hotkey_str
         .parse()
@@ -185,14 +456,19 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("N-Top")
+                .build(),
+        )
         .setup(|app| {
-            // Load settings
             let settings = load_settings(&app.handle());
             let hotkey = settings.hotkey.clone();
 
             app.manage(AppState {
                 mode: Mutex::new(OverlayMode::PassThrough),
                 settings: Mutex::new(settings),
+                mouse_in_overlay: Mutex::new(false),
             });
 
             // Set overlay window position from saved settings
@@ -202,15 +478,24 @@ pub fn run() {
                 let _ = window.set_position(tauri::Position::Physical(
                     tauri::PhysicalPosition::new(s.pos_x as i32, s.pos_y as i32),
                 ));
-                // Start in pass-through mode
                 let _ = window.set_ignore_cursor_events(true);
+
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::Moved(position) = event {
+                        save_overlay_position(&app_handle, *position);
+                    }
+                });
             }
 
             // Build tray menu
-            let toggle_item = MenuItem::with_id(app, "toggle", "切换编辑/穿透", true, None::<&str>)?;
+            let toggle_item =
+                MenuItem::with_id(app, "toggle", "切换编辑/穿透", true, None::<&str>)?;
             let panel_item = MenuItem::with_id(app, "panel", "打开控制面板", true, None::<&str>)?;
+            let history_item = MenuItem::with_id(app, "history", "历史记录", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出 N-Top", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&toggle_item, &panel_item, &quit_item])?;
+            let menu =
+                Menu::with_items(app, &[&toggle_item, &panel_item, &history_item, &quit_item])?;
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -219,6 +504,7 @@ pub fn run() {
                 .on_menu_event(move |app_handle, event| match event.id.as_ref() {
                     "toggle" => toggle_mode(app_handle),
                     "panel" => show_control_panel(app_handle),
+                    "history" => show_history_window(app_handle),
                     "quit" => {
                         app_handle.exit(0);
                     }
@@ -239,8 +525,24 @@ pub fn run() {
 
             // Register global hotkey
             if let Err(e) = register_hotkey(&app.handle(), &hotkey) {
-                eprintln!("热键注册警告: {} — 请在系统设置中授权辅助功能权限", e);
+                eprintln!("热键注册警告: {} - 请在系统设置中授权辅助功能权限", e);
             }
+
+            // Apply dock visibility from saved settings
+            {
+                use tauri::ActivationPolicy;
+                let s = app.state::<AppState>();
+                let show_dock = s.settings.lock().unwrap().show_in_dock;
+                let policy = if show_dock {
+                    ActivationPolicy::Regular
+                } else {
+                    ActivationPolicy::Accessory
+                };
+                let _ = app.handle().set_activation_policy(policy);
+            }
+
+            // Start mouse hover polling for pass-through transparency
+            start_mouse_poll(app.handle().clone());
 
             Ok(())
         })
@@ -250,6 +552,9 @@ pub fn run() {
             toggle_overlay_mode,
             set_overlay_mode,
             get_mode,
+            is_mouse_in_overlay,
+            set_dock_visibility,
+            get_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
