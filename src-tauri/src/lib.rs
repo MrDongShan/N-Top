@@ -156,11 +156,45 @@ fn save_settings(app: &tauri::AppHandle, settings: &AppSettings) {
 }
 
 fn save_overlay_position(app: &tauri::AppHandle, position: tauri::PhysicalPosition<i32>) {
+    // 显示器热插拔/系统切换瞬间 Moved 事件可能上报屏幕外的脏坐标，直接丢弃，
+    // 否则下次启动会把浮窗恢复到屏幕外。
+    if let Some(window) = app.get_webview_window("overlay") {
+        if let Ok(size) = window.outer_size() {
+            if !is_window_visible_on_any_monitor(app, position, size) {
+                return;
+            }
+        }
+    }
+
     let state = app.state::<AppState>();
     let mut settings = state.settings.lock().unwrap();
     settings.pos_x = f64::from(position.x);
     settings.pos_y = f64::from(position.y);
     save_settings(app, &settings);
+}
+
+/// 窗口在任意一块显示器上是否有足够可见区域（可被看到并拖回）
+fn is_window_visible_on_any_monitor(
+    app: &tauri::AppHandle,
+    pos: tauri::PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+) -> bool {
+    let Ok(monitors) = app.available_monitors() else {
+        return true;
+    };
+    if monitors.is_empty() {
+        return true;
+    }
+
+    monitors.iter().any(|m| {
+        let (mx, my) = (m.position().x as f64, m.position().y as f64);
+        let (mw, mh) = (m.size().width as f64, m.size().height as f64);
+        let (wx, wy) = (pos.x as f64, pos.y as f64);
+        let (ww, wh) = (size.width as f64, size.height as f64);
+        let overlap_w = (wx + ww).min(mx + mw) - wx.max(mx);
+        let overlap_h = (wy + wh).min(my + mh) - wy.max(my);
+        overlap_w >= 60.0 && overlap_h >= 40.0
+    })
 }
 
 /// Get current mouse cursor position via core-graphics
@@ -475,9 +509,16 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("overlay") {
                 let state = app.state::<AppState>();
                 let s = state.settings.lock().unwrap();
-                let _ = window.set_position(tauri::Position::Physical(
-                    tauri::PhysicalPosition::new(s.pos_x as i32, s.pos_y as i32),
-                ));
+                let mut pos = tauri::PhysicalPosition::new(s.pos_x as i32, s.pos_y as i32);
+                let size = window.outer_size().unwrap_or_default();
+                if !is_window_visible_on_any_monitor(&app.handle(), pos, size) {
+                    eprintln!(
+                        "浮窗保存的位置 ({}, {}) 不在任何屏幕内，重置到主屏幕左上角",
+                        pos.x, pos.y
+                    );
+                    pos = tauri::PhysicalPosition::new(100, 100);
+                }
+                let _ = window.set_position(tauri::Position::Physical(pos));
                 let _ = window.set_ignore_cursor_events(true);
 
                 let app_handle = app.handle().clone();
