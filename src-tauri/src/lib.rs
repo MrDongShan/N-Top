@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    window::{Effect, EffectState, EffectsBuilder},
     Emitter, Manager, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -13,12 +14,12 @@ const HISTORY_LABEL: &str = "history";
 /// 托盘图标 id，用来查图标在菜单栏上的位置
 const TRAY_ID: &str = "ntop-tray";
 
-/// 控制面板可见区域尺寸（不含四周留给 CSS 投影的透明边）
+/// 控制面板窗口尺寸（逻辑点），与 styles.css 里 .cp 的铺满布局一一对应
 const PANEL_WIDTH: f64 = 320.0;
-/// 面板内容一屏放下（headless 实测：正文 613 + 头部/常驻区 155）
-const PANEL_HEIGHT: f64 = 770.0;
-/// 窗口四周的透明边，避免 CSS 投影被窗口边界裁掉
-const PANEL_INSET: f64 = 10.0;
+/// 面板内容一屏放下（headless 实测：正文 613 + 头部/常驻区 155，再留一点呼吸位）
+const PANEL_HEIGHT: f64 = 786.0;
+/// 面板圆角：必须与 styles.css 的 --glass-radius 一致，否则两层圆角会错位
+const PANEL_RADIUS: f64 = 20.0;
 /// 面板顶部与菜单栏图标之间的间距
 const PANEL_TRAY_GAP: f64 = 6.0;
 /// 失焦后先等这么久再判断，让焦点事件落地
@@ -343,7 +344,8 @@ fn monitor_containing(app: &tauri::AppHandle, x: f64, y: f64) -> Option<tauri::M
     })
 }
 
-/// 懒创建控制面板：无边框透明浮窗，样式由 CSS 负责
+/// 懒创建控制面板：无边框透明浮窗，背景交给 NSVisualEffectView 做毛玻璃，
+/// 圆角、投影由窗口本身提供，CSS 只叠白色薄雾和内描边
 fn ensure_control_panel(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
     if let Some(window) = app.get_webview_window(CONTROL_PANEL_LABEL) {
         return Some(window);
@@ -355,13 +357,23 @@ fn ensure_control_panel(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> 
         tauri::WebviewUrl::App("index.html#/control-panel".into()),
     )
     .title("N-Top")
-    .inner_size(PANEL_WIDTH + PANEL_INSET * 2.0, PANEL_HEIGHT + PANEL_INSET * 2.0)
+    .inner_size(PANEL_WIDTH, PANEL_HEIGHT)
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
     .decorations(false)
     .transparent(true)
-    .shadow(false)
+    .effects(
+        EffectsBuilder::new()
+            .effect(Effect::Popover)
+            .state(EffectState::Active)
+            .radius(PANEL_RADIUS)
+            .build(),
+    )
+    // 面板固定浅色：系统的深色模式也不该把毛玻璃染黑
+    .theme(Some(tauri::Theme::Light))
+    // 投影也跟着圆角走，直接由窗口画，不用再留透明边
+    .shadow(true)
     .always_on_top(true)
     .skip_taskbar(true)
     // 面板要能出现在任何桌面/显示器上，否则切到另一个显示器的桌面后
@@ -400,11 +412,11 @@ fn position_control_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow)
         .max(1.0);
 
     // 面板尺寸（逻辑点）换算到同一套物理像素
-    let win_w = (PANEL_WIDTH + PANEL_INSET * 2.0) * scale;
-    let win_h = (PANEL_HEIGHT + PANEL_INSET * 2.0) * scale;
+    let win_w = PANEL_WIDTH * scale;
+    let win_h = PANEL_HEIGHT * scale;
 
     let mut x = icon_center_x - win_w / 2.0;
-    let mut y = icon_bottom + (PANEL_TRAY_GAP - PANEL_INSET) * scale;
+    let mut y = icon_bottom + PANEL_TRAY_GAP * scale;
 
     // 托盘图标贴着屏幕右边缘，靠边的屏幕要夹回来
     if let Some(monitor) = &monitor {
@@ -489,6 +501,15 @@ fn show_history_window(app: &tauri::AppHandle) {
     .title("N-Top 历史记录")
     .inner_size(360.0, 480.0)
     .resizable(true)
+    // 正文用同一套毛玻璃观感，标题栏保持系统绘制
+    .transparent(true)
+    .effects(
+        EffectsBuilder::new()
+            .effect(Effect::Popover)
+            .state(EffectState::FollowsWindowActiveState)
+            .build(),
+    )
+    .theme(Some(tauri::Theme::Light))
     .always_on_top(true)
     .visible(true)
     .build()

@@ -131,7 +131,7 @@ body.mouse-over {
 /* ===== Control Panel ===== */
 
 body:has(.cp) {
-  /* 窗口是透明的，圆角和投影都画在 .cp 上，才像菜单栏弹窗 */
+  /* 窗口是透明的：毛玻璃来自 Rust 侧的 NSVisualEffectView，圆角和投影交给窗口本身 */
   background: transparent;
   -webkit-user-select: none;
   user-select: none;
@@ -152,18 +152,41 @@ body:has(.cp) #app {
   overflow: hidden;
 }
 
-/* 四周留出与 Rust 端 PANEL_INSET 一致的透明边，投影不会被窗口边界裁掉 */
+/* 玻璃外观令牌：下拉面板和历史记录窗口共用 */
+body:has(.cp),
+body:has(.hist-container) {
+  color-scheme: light;
+  --glass-radius: 20px; /* 必须与 lib.rs 的 PANEL_RADIUS 一致 */
+  --glass-tint: rgba(255, 255, 255, 0.42);
+  --glass-fill: rgba(255, 255, 255, 0.62);
+  --glass-fill-hover: rgba(255, 255, 255, 0.92);
+  --glass-hairline: rgba(255, 255, 255, 0.6);
+  --glass-stroke: rgba(0, 0, 0, 0.08);
+  --glass-separator: rgba(0, 0, 0, 0.06);
+  --glass-ink: #1d1d1f;
+  --glass-ink-2: rgba(60, 60, 67, 0.85);
+  --glass-ink-3: rgba(60, 60, 67, 0.55);
+  --glass-ink-4: rgba(60, 60, 67, 0.4);
+  --accent-blue: #0a84ff;
+  --accent-green: #34c759;
+  --accent-red: #ff3b30;
+}
+
+/* 面板铺满窗口：圆角与投影都在窗口层，避免两层错位露出桌面 */
 .cp {
-  margin: 10px;
-  height: calc(100vh - 20px);
-  background: #1c1c1e;
-  border: 1px solid #38383a;
-  border-radius: 12px;
-  /* 投影要落在 10px 透明边内，否则会被窗口边界裁掉 */
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  margin: 0;
+  height: 100vh;
+  background: var(--glass-tint);
+  border: 1px solid var(--glass-hairline);
+  border-radius: var(--glass-radius);
+  /* 外侧一丝深色发丝边压住浅色桌面，内侧一圈高光当玻璃厚度 */
+  box-shadow:
+    inset 0 0 0 0.5px rgba(0, 0, 0, 0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  color: var(--glass-ink);
 }
 
 .cp-header {
@@ -171,31 +194,31 @@ body:has(.cp) #app {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 9px 10px 7px 14px;
+  padding: 10px 10px 8px 16px;
 }
 
 .cp-title {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.4px;
-  color: #8e8e93;
+  color: var(--glass-ink-3);
 }
 
 .cp-close {
   border: none;
   background: none;
-  color: #8e8e93;
+  color: var(--glass-ink-3);
   font-size: 12px;
   line-height: 1;
-  padding: 4px 6px;
-  border-radius: 6px;
+  padding: 4px 7px;
+  border-radius: 7px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
 .cp-close:hover {
-  background: #2c2c2e;
-  color: #fff;
+  background: rgba(0, 0, 0, 0.07);
+  color: var(--glass-ink);
 }
 
 /* 切换按钮常驻，不跟着滚动 */
@@ -207,13 +230,21 @@ body:has(.cp) #app {
 /* 底栏常驻：历史记录和退出不该要滚动才能点到 */
 .cp-footer {
   flex-shrink: 0;
-  padding: 0 14px;
+  padding: 0 14px 12px;
 }
 
 .cp-footer-row {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.cp-foot {
+  margin: 8px 0 0;
+  font-size: 10px;
+  text-align: center;
+  letter-spacing: 0.2px;
+  color: var(--glass-ink-4);
 }
 
 .cp-body {
@@ -225,13 +256,19 @@ body:has(.cp) #app {
 }
 
 .cp-body::-webkit-scrollbar {
-  width: 8px;
+  width: 10px;
 }
 
 .cp-body::-webkit-scrollbar-thumb {
-  background: #48484a;
-  border: 2px solid #1c1c1e;
-  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.18);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 5px;
+}
+
+.cp-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.32);
+  background-clip: padding-box;
 }
 
 .cp-body::-webkit-scrollbar-track {
@@ -243,33 +280,40 @@ body:has(.cp) #app {
   align-items: center;
   gap: 8px;
   width: 100%;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 12px;
   padding: 11px 14px;
+  font-family: inherit;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
   margin-bottom: 10px;
 }
 
 .cp-toggle.is-edit {
-  background: #30a14e;
+  background: var(--accent-green);
   color: #fff;
+  box-shadow: 0 1px 3px rgba(52, 199, 89, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+.cp-toggle.is-edit:hover {
+  background: #2fb350;
 }
 
 .cp-toggle.is-passthrough {
-  background: #2c2c2e;
-  color: #98989d;
-  border: 1px solid #38383a;
+  background: var(--glass-fill);
+  color: var(--glass-ink-2);
+  border-color: var(--glass-stroke);
 }
 
-.cp-toggle:hover {
-  filter: brightness(1.1);
+.cp-toggle.is-passthrough:hover {
+  background: var(--glass-fill-hover);
+  border-color: rgba(0, 0, 0, 0.12);
 }
 
 .cp-toggle:active {
-  transform: scale(0.98);
+  transform: scale(0.985);
 }
 
 .cp-toggle-icon {
@@ -284,7 +328,7 @@ body:has(.cp) #app {
 
 .cp-row-item {
   padding: 4px 0;
-  border-bottom: 1px solid #2c2c2e;
+  border-bottom: 1px solid var(--glass-separator);
 }
 
 .cp-row-item:last-of-type {
@@ -301,20 +345,20 @@ body:has(.cp) #app {
 .cp-row-title {
   font-size: 13px;
   font-weight: 500;
-  color: #d1d1d6;
+  color: var(--glass-ink);
 }
 
 .cp-row-value {
   font-size: 15px;
   font-weight: 700;
-  color: #fff;
+  color: var(--glass-ink);
   font-variant-numeric: tabular-nums;
 }
 
 .cp-row-value small {
   font-size: 11px;
   font-weight: 500;
-  color: #636366;
+  color: var(--glass-ink-3);
   margin-left: 1px;
 }
 
@@ -333,11 +377,11 @@ body:has(.cp) #app {
 
 .cp-range {
   width: 100%;
-  height: 6px;
+  height: 5px;
   -webkit-appearance: none;
   appearance: none;
-  background: #2c2c2e;
-  border-radius: 3px;
+  background: rgba(120, 120, 128, 0.18);
+  border-radius: 2.5px;
   outline: none;
   cursor: pointer;
 }
@@ -351,17 +395,17 @@ body:has(.cp) #app {
   background: #fff;
   cursor: pointer;
   border: none;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
   transition: transform 0.1s;
 }
 
 .cp-range::-webkit-slider-thumb:hover {
-  transform: scale(1.15);
+  transform: scale(1.12);
 }
 
 .cp-color-text {
   font-size: 11px;
-  color: #636366;
+  color: var(--glass-ink-3);
   font-family: ui-monospace, monospace;
   letter-spacing: 0.3px;
 }
@@ -372,16 +416,16 @@ body:has(.cp) #app {
   border-radius: 50%;
   background: var(--swatch-color, #fff);
   cursor: pointer;
-  border: 2px solid rgba(255, 255, 255, 0.2);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.16);
   transition: transform 0.1s, border-color 0.15s;
   overflow: hidden;
   position: relative;
 }
 
 .cp-swatch:hover {
-  transform: scale(1.1);
-  border-color: rgba(255, 255, 255, 0.4);
+  transform: scale(1.08);
+  border-color: #fff;
 }
 
 .cp-swatch input[type="color"] {
@@ -415,8 +459,8 @@ body:has(.cp) #app {
   position: absolute;
   inset: 0;
   border-radius: 13px;
-  background: #2c2c2e;
-  border: 1px solid #38383a;
+  background: rgba(120, 120, 128, 0.28);
+  border: none;
   transition: background 0.2s ease;
 }
 
@@ -428,12 +472,13 @@ body:has(.cp) #app {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: #636366;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .cp-switch input:checked ~ .cp-switch-track {
-  background: #30a14e;
+  background: var(--accent-green);
 }
 
 .cp-switch input:checked ~ .cp-switch-track::after {
@@ -443,77 +488,77 @@ body:has(.cp) #app {
 
 .cp-hotkey-input {
   width: 100%;
-  border: 1px solid #38383a;
+  border: 1px solid var(--glass-stroke);
   border-radius: 10px;
   padding: 10px 14px;
   font-size: 13px;
   font-family: ui-monospace, "SF Mono", monospace;
   outline: none;
-  background: #2c2c2e;
-  color: #fff;
-  transition: all 0.15s;
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--glass-ink);
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
   margin-top: 4px;
 }
 
+.cp-hotkey-input::placeholder {
+  color: var(--glass-ink-4);
+}
+
 .cp-hotkey-input.capturing {
-  border-color: #0a84ff;
-  background: #1c1c1e;
-  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.25);
+  border-color: var(--accent-blue);
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.18);
 }
 
 .cp-tip {
   display: block;
   font-size: 10px;
-  color: #48484a;
+  color: var(--glass-ink-4);
   margin-top: 3px;
   letter-spacing: 0.2px;
+}
+
+.cp-history-btn,
+.cp-quit {
+  border: 1px solid var(--glass-stroke);
+  background: var(--glass-fill);
+  color: var(--glass-ink-2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
 .cp-history-btn {
   flex: 1;
   min-width: 0;
-  border: 1px solid #3a3a3c;
-  background: #2c2c2e;
-  color: #d1d1d6;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 7px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
 .cp-history-btn:hover {
-  background: #3a3a3c;
-  border-color: #48484a;
-  color: #fff;
+  background: var(--glass-fill-hover);
+  border-color: rgba(0, 0, 0, 0.12);
+  color: var(--glass-ink);
 }
 
 .cp-quit {
   flex-shrink: 0;
-  border: 1px solid #3a3a3c;
-  background: #2c2c2e;
-  color: #ff6b64;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 7px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  color: var(--accent-red);
 }
 
 .cp-quit:hover {
-  background: #ff453a;
-  border-color: #ff453a;
+  background: var(--accent-red);
+  border-color: var(--accent-red);
   color: #fff;
 }
 
 /* ===== History Window 历史记录窗口 ===== */
 
+/* 窗口本身透明：标题栏仍由系统绘制，正文区域露出 Rust 侧的毛玻璃 */
 body:has(.hist-container) {
-  background: #1c1c1e;
+  background: transparent;
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
   height: 100vh;
@@ -528,6 +573,8 @@ body:has(.hist-container) {
   flex-direction: column;
   height: 100vh;
   box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.35);
+  color: var(--glass-ink);
 }
 
 .hist-header {
@@ -541,24 +588,26 @@ body:has(.hist-container) {
 .hist-title {
   font-size: 15px;
   font-weight: 600;
-  color: #fff;
+  color: var(--glass-ink);
 }
 
 .hist-refresh {
-  border: 1px solid #38383a;
-  border-radius: 8px;
+  border: 1px solid var(--glass-stroke);
+  border-radius: 9px;
   padding: 6px 12px;
+  font-family: inherit;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  background: #2c2c2e;
-  color: #d1d1d6;
-  transition: all 0.15s;
+  background: var(--glass-fill);
+  color: var(--glass-ink-2);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
 .hist-refresh:hover {
-  background: #3a3a3c;
-  color: #fff;
+  background: var(--glass-fill-hover);
+  border-color: rgba(0, 0, 0, 0.12);
+  color: var(--glass-ink);
 }
 
 .hist-list {
@@ -571,25 +620,43 @@ body:has(.hist-container) {
   user-select: none;
 }
 
+.hist-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.hist-list::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 5px;
+}
+
+.hist-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 .hist-loading, .hist-empty {
   font-size: 13px;
-  color: #636366;
+  color: var(--glass-ink-4);
   text-align: center;
   padding: 40px 0;
 }
 
 .hist-item {
-  background: #2c2c2e;
-  border-radius: 10px;
-  border: 1px solid #38383a;
+  background: var(--glass-fill);
+  border-radius: 12px;
+  border: 1px solid var(--glass-hairline);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
   padding: 12px 14px;
-  transition: border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .hist-item:hover {
-  border-color: #48484a;
+  background: var(--glass-fill-hover);
+  border-color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
 }
 
 .hist-item-head {
@@ -606,30 +673,31 @@ body:has(.hist-container) {
 
 .hist-time {
   font-size: 11px;
-  color: #636366;
+  color: var(--glass-ink-3);
   font-family: ui-monospace, "SF Mono", monospace;
 }
 
 .hist-expand, .hist-copy {
   border: none;
-  border-radius: 6px;
+  border-radius: 7px;
   padding: 4px 10px;
+  font-family: inherit;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  background: #3a3a3c;
-  color: #d1d1d6;
-  transition: all 0.15s;
+  background: rgba(120, 120, 128, 0.14);
+  color: var(--glass-ink-2);
+  transition: background 0.15s, color 0.15s;
 }
 
 .hist-expand:hover, .hist-copy:hover {
-  background: #0a84ff;
+  background: var(--accent-blue);
   color: #fff;
 }
 
 .hist-preview {
   font-size: 13px;
-  color: #98989d;
+  color: rgba(60, 60, 67, 0.72);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
@@ -639,7 +707,7 @@ body:has(.hist-container) {
 
 .hist-full {
   font-size: 13px;
-  color: #d1d1d6;
+  color: var(--glass-ink);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
@@ -648,8 +716,9 @@ body:has(.hist-container) {
   cursor: text;
   max-height: 300px;
   overflow-y: auto;
-  background: #1c1c1e;
-  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  border-radius: 8px;
   padding: 10px 12px;
   margin-top: 4px;
 }
