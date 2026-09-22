@@ -76,6 +76,10 @@ pub struct AppState {
     pub mouse_in_overlay: Mutex<bool>,
     /// 控制面板「请勿自动收起」的截止时间
     pub panel_keep_alive: Mutex<Option<Instant>>,
+    /// 面板是否处于展开状态（判断点击是「开」还是「关」以它为准）
+    pub panel_open: Mutex<bool>,
+    /// 每次开/关都自增，用来让更早排队的自动收起失效
+    pub panel_generation: Mutex<u64>,
 }
 
 fn settings_path(app: &tauri::AppHandle) -> std::path::PathBuf {
@@ -315,13 +319,28 @@ fn toggle_mode(app: &tauri::AppHandle) {
     set_mode(app, next);
 }
 
-/// 托盘图标在菜单栏上的位置（物理像素）
+/// 托盘图标在菜单栏上的位置和尺寸（物理像素，按图标所在显示器的缩放换算）
 fn tray_rect(app: &tauri::AppHandle) -> Option<(f64, f64, f64, f64)> {
     let tray = app.tray_by_id(TRAY_ID)?;
     let rect = tray.rect().ok().flatten()?;
     let pos = rect.position.to_physical::<f64>(1.0);
     let size = rect.size.to_physical::<f64>(1.0);
     Some((pos.x, pos.y, size.width, size.height))
+}
+
+/// 点 (x, y) 落在哪个显示器上。
+/// 不能用 AppHandle::monitor_from_point：macOS 上它按 CGDisplayBounds（点）判断，
+/// 而 Monitor::position/size 又是「点 × 该屏缩放」，两套坐标在缩放不同的
+/// 第二块屏上对不上，会直接返回 None。
+fn monitor_containing(app: &tauri::AppHandle, x: f64, y: f64) -> Option<tauri::Monitor> {
+    let monitors = app.available_monitors().ok()?;
+    monitors.into_iter().find(|monitor| {
+        let pos = monitor.position();
+        let size = monitor.size();
+        let (min_x, min_y) = (pos.x as f64, pos.y as f64);
+        let (max_x, max_y) = (min_x + size.width as f64, min_y + size.height as f64);
+        x >= min_x && x < max_x && y >= min_y && y < max_y
+    })
 }
 
 /// 懒创建控制面板：无边框透明浮窗，样式由 CSS 负责
@@ -345,6 +364,9 @@ fn ensure_control_panel(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> 
     .shadow(false)
     .always_on_top(true)
     .skip_taskbar(true)
+    // 面板要能出现在任何桌面/显示器上，否则切到另一个显示器的桌面后
+    // 点开也看不到（窗口还留在原来的桌面上）
+    .visible_on_all_workspaces(true)
     .visible(false)
     .build()
     {
@@ -356,20 +378,36 @@ fn ensure_control_panel(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> 
     }
 }
 
-/// 把面板贴到菜单栏图标正下方，并夹在当前显示器的可视范围内
+/// 把面板贴到菜单栏图标正下方，并夹在图标所在显示器的可视范围内。
+///
+/// 托盘 rect 和 Monitor::position/size 都是「逻辑点 × 该屏缩放」的物理像素，
+/// 所以先在这一套坐标里算，最后除以图标所在显示器的缩放换回逻辑点再设位置。
+/// 直接把这套物理值交给 set_position 会被 tao 用「窗口当前所在显示器」的缩放
+/// 再解释一次，两台显示器缩放不同时就会算到屏幕外面，表现为点好几次才出来。
 fn position_control_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
     let Some((tray_x, tray_y, tray_w, tray_h)) = tray_rect(app) else {
         return;
     };
 
-    let win_w = PANEL_WIDTH + PANEL_INSET * 2.0;
-    let win_h = PANEL_HEIGHT + PANEL_INSET * 2.0;
+    let icon_center_x = tray_x + tray_w / 2.0;
+    let icon_bottom = tray_y + tray_h;
 
-    let mut x = tray_x + tray_w / 2.0 - win_w / 2.0;
-    let mut y = tray_y + tray_h + PANEL_TRAY_GAP - PANEL_INSET;
+    let monitor = monitor_containing(app, icon_center_x, tray_y + tray_h / 2.0);
+    let scale = monitor
+        .as_ref()
+        .map(|monitor| monitor.scale_factor())
+        .unwrap_or(1.0)
+        .max(1.0);
+
+    // 面板尺寸（逻辑点）换算到同一套物理像素
+    let win_w = (PANEL_WIDTH + PANEL_INSET * 2.0) * scale;
+    let win_h = (PANEL_HEIGHT + PANEL_INSET * 2.0) * scale;
+
+    let mut x = icon_center_x - win_w / 2.0;
+    let mut y = icon_bottom + (PANEL_TRAY_GAP - PANEL_INSET) * scale;
 
     // 托盘图标贴着屏幕右边缘，靠边的屏幕要夹回来
-    if let Ok(Some(monitor)) = app.monitor_from_point(tray_x, tray_y) {
+    if let Some(monitor) = &monitor {
         let m_pos = monitor.position();
         let m_size = monitor.size();
         let (min_x, min_y) = (m_pos.x as f64, m_pos.y as f64);
@@ -379,22 +417,29 @@ fn position_control_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow)
         y = y.clamp(min_y, max_y.max(min_y));
     }
 
-    let _ = window.set_position(tauri::PhysicalPosition::new(
-        x.round() as i32,
-        y.round() as i32,
-    ));
+    let _ = window.set_position(tauri::LogicalPosition::new(x / scale, y / scale));
 }
 
 fn open_control_panel(app: &tauri::AppHandle) {
     let Some(window) = ensure_control_panel(app) else {
         return;
     };
+    let state = app.state::<AppState>();
 
-    // 只把焦点交给面板，不动浮窗的编辑/穿透状态
+    // 窗口只属于它第一次显示时所在的那个桌面，切到别的桌面后 show 出来还在原处
+    let _ = window.set_visible_on_all_workspaces(true);
+
+    // 每次都按当前托盘图标的位置重算，并强行走一遍 hide → show，
+    // 让窗口重新排到最前面、位置改动立刻生效
     position_control_panel(app, &window);
-    let _ = app.show();
+    let _ = window.hide();
     let _ = window.show();
+    let _ = window.set_always_on_top(true);
+    // 只把焦点交给面板，不动浮窗的编辑/穿透状态
     let _ = window.set_focus();
+
+    *state.panel_open.lock().unwrap() = true;
+    *state.panel_generation.lock().unwrap() += 1;
 }
 
 fn hide_control_panel(app: &tauri::AppHandle) {
@@ -404,15 +449,21 @@ fn hide_control_panel(app: &tauri::AppHandle) {
 
     let state = app.state::<AppState>();
     *state.panel_keep_alive.lock().unwrap() = None;
+    *state.panel_open.lock().unwrap() = false;
+    *state.panel_generation.lock().unwrap() += 1;
 }
 
 fn toggle_control_panel(app: &tauri::AppHandle) {
-    let visible = app
-        .get_webview_window(CONTROL_PANEL_LABEL)
-        .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false);
+    // 以自己的状态为准，而不是窗口的 is_visible：窗口在别的桌面上时
+    // is_visible 同样是 true，会把「打开」误判成「收起」，点起来就像没反应
+    let state = app.state::<AppState>();
+    let open = *state.panel_open.lock().unwrap()
+        && app
+            .get_webview_window(CONTROL_PANEL_LABEL)
+            .and_then(|window| window.is_visible().ok())
+            .unwrap_or(false);
 
-    if visible {
+    if open {
         hide_control_panel(app);
     } else {
         open_control_panel(app);
@@ -455,11 +506,18 @@ fn keep_alive_active(app: &tauri::AppHandle) -> bool {
 /// 面板失焦后判断要不要自动收起。
 /// 光标在浮窗上、或浮窗正在编辑（本应用窗口仍持有焦点）时保持展开。
 fn spawn_control_panel_autohide(app: tauri::AppHandle) {
+    let generation = *app.state::<AppState>().panel_generation.lock().unwrap();
+
     std::thread::spawn(move || {
         let started = Instant::now();
 
         loop {
             std::thread::sleep(PANEL_AUTOHIDE_DELAY);
+
+            // 这期间面板被重新打开过，本次失焦作废，别把刚打开的面板收掉
+            if *app.state::<AppState>().panel_generation.lock().unwrap() != generation {
+                return;
+            }
 
             let Some(window) = app.get_webview_window(CONTROL_PANEL_LABEL) else {
                 return;
@@ -689,6 +747,8 @@ pub fn run() {
                 settings: Mutex::new(settings),
                 mouse_in_overlay: Mutex::new(false),
                 panel_keep_alive: Mutex::new(None),
+                panel_open: Mutex::new(false),
+                panel_generation: Mutex::new(0),
             });
 
             // Set overlay window position from saved settings
