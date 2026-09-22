@@ -292,6 +292,9 @@ fn toggle_mode(app: &tauri::AppHandle) {
 }
 
 fn show_control_panel(app: &tauri::AppHandle) {
+    // 打开控制窗口时浮窗默认进入编辑态，保证面板按钮与实际状态一致
+    set_mode(app, OverlayMode::Edit);
+
     if let Some(window) = app.get_webview_window("control-panel") {
         let _ = app.show();
         let _ = window.unminimize();
@@ -300,7 +303,7 @@ fn show_control_panel(app: &tauri::AppHandle) {
         let _ = window.request_user_attention(Some(UserAttentionType::Critical));
         let _ = window.set_focus();
     } else {
-        let _ = WebviewWindowBuilder::new(
+        match WebviewWindowBuilder::new(
             app,
             "control-panel",
             tauri::WebviewUrl::App("index.html#/control-panel".into()),
@@ -312,7 +315,13 @@ fn show_control_panel(app: &tauri::AppHandle) {
         .decorations(true)
         .always_on_top(true)
         .visible(true)
-        .build();
+        .build()
+        {
+            Ok(window) => {
+                let _ = window.set_focus();
+            }
+            Err(e) => eprintln!("创建控制面板失败: {}", e),
+        }
     }
 }
 
@@ -495,6 +504,14 @@ pub fn run() {
                 .app_name("N-Top")
                 .build(),
         )
+        .on_window_event(|window, event| {
+            // 控制窗口关闭后，浮窗回到穿透态
+            if window.label() == "control-panel"
+                && matches!(event, WindowEvent::CloseRequested { .. })
+            {
+                set_mode(window.app_handle(), OverlayMode::PassThrough);
+            }
+        })
         .setup(|app| {
             let settings = load_settings(&app.handle());
             let hotkey = settings.hotkey.clone();

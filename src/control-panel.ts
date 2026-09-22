@@ -173,7 +173,9 @@ async function initControlPanel(): Promise<void> {
 
   btnToggle.addEventListener("click", async () => {
     await invoke("toggle_overlay_mode");
-    mode = mode === "edit" ? "pass-through" : "edit";
+    // 以后端状态为准。后端在切换时会 emit "mode-changed"，
+    // 若这里再本地翻转一次会与事件重复，导致按钮文案慢一拍。
+    mode = await invoke<string>("get_mode");
     updateToggle();
   });
 
