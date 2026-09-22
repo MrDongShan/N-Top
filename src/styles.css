@@ -131,7 +131,8 @@ body.mouse-over {
 /* ===== Control Panel ===== */
 
 body:has(.cp) {
-  background: #1c1c1e;
+  /* 窗口是透明的，圆角和投影都画在 .cp 上，才像菜单栏弹窗 */
+  background: transparent;
   -webkit-user-select: none;
   user-select: none;
   margin: 0;
@@ -142,6 +143,7 @@ body:has(.cp) {
 
 html:has(.cp) {
   overflow: hidden;
+  background: transparent;
 }
 
 body:has(.cp) #app {
@@ -150,12 +152,90 @@ body:has(.cp) #app {
   overflow: hidden;
 }
 
+/* 四周留出与 Rust 端 PANEL_INSET 一致的透明边，投影不会被窗口边界裁掉 */
 .cp {
-  padding: 14px 16px;
+  margin: 10px;
+  height: calc(100vh - 20px);
+  background: #1c1c1e;
+  border: 1px solid #38383a;
+  border-radius: 12px;
+  /* 投影要落在 10px 透明边内，否则会被窗口边界裁掉 */
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  height: 100%;
+  overflow: hidden;
+}
+
+.cp-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 10px 7px 14px;
+}
+
+.cp-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: #8e8e93;
+}
+
+.cp-close {
+  border: none;
+  background: none;
+  color: #8e8e93;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.cp-close:hover {
+  background: #2c2c2e;
+  color: #fff;
+}
+
+/* 切换按钮常驻，不跟着滚动 */
+.cp-pinned {
+  flex-shrink: 0;
+  padding: 0 14px;
+}
+
+/* 底栏常驻：历史记录和退出不该要滚动才能点到 */
+.cp-footer {
+  flex-shrink: 0;
+  padding: 0 14px;
+}
+
+.cp-footer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cp-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 14px 12px;
+}
+
+.cp-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.cp-body::-webkit-scrollbar-thumb {
+  background: #48484a;
+  border: 2px solid #1c1c1e;
+  border-radius: 4px;
+}
+
+.cp-body::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .cp-toggle {
@@ -165,12 +245,12 @@ body:has(.cp) #app {
   width: 100%;
   border: none;
   border-radius: 12px;
-  padding: 14px 16px;
+  padding: 11px 14px;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .cp-toggle.is-edit {
@@ -203,7 +283,7 @@ body:has(.cp) #app {
 }
 
 .cp-row-item {
-  padding: 10px 0;
+  padding: 4px 0;
   border-bottom: 1px solid #2c2c2e;
 }
 
@@ -215,7 +295,7 @@ body:has(.cp) #app {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .cp-row-title {
@@ -385,103 +465,49 @@ body:has(.cp) #app {
   display: block;
   font-size: 10px;
   color: #48484a;
-  margin-top: 6px;
+  margin-top: 3px;
   letter-spacing: 0.2px;
 }
 
 .cp-history-btn {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 100%;
-  border: none;
-  background: none;
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #3a3a3c;
+  background: #2c2c2e;
   color: #d1d1d6;
-  font-size: 13px;
-  font-weight: 500;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+  border-radius: 8px;
   cursor: pointer;
-  padding: 8px 0;
-  transition: color 0.15s;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
 .cp-history-btn:hover {
-  color: #fff;
-}
-
-.cp-history-arrow {
-  font-size: 10px;
-  color: #636366;
-}
-
-.cp-history-list {
-  margin-top: 6px;
-  max-height: 200px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.cp-history-empty {
-  font-size: 11px;
-  color: #48484a;
-  text-align: center;
-  padding: 12px 0;
-}
-
-.cp-history-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  background: #2c2c2e;
-  border-radius: 8px;
-  border: 1px solid #38383a;
-}
-
-.cp-history-time {
-  font-size: 10px;
-  color: #636366;
-  font-family: ui-monospace, monospace;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.cp-history-preview {
-  flex: 1;
-  font-size: 11px;
-  color: #98989d;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.cp-history-copy {
-  flex-shrink: 0;
-  border: none;
-  border-radius: 6px;
-  padding: 4px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
   background: #3a3a3c;
-  color: #d1d1d6;
-  transition: all 0.15s;
-}
-
-.cp-history-copy:hover {
-  background: #0a84ff;
+  border-color: #48484a;
   color: #fff;
 }
 
-.cp-foot {
-  font-size: 11px;
-  color: #48484a;
-  text-align: center;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid #2c2c2e;
-  letter-spacing: 0.3px;
+.cp-quit {
+  flex-shrink: 0;
+  border: 1px solid #3a3a3c;
+  background: #2c2c2e;
+  color: #ff6b64;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.cp-quit:hover {
+  background: #ff453a;
+  border-color: #ff453a;
+  color: #fff;
 }
 
 /* ===== History Window 历史记录窗口 ===== */

@@ -43,105 +43,122 @@ async function initControlPanel(): Promise<void> {
 
   app.innerHTML = `
     <div class="cp">
-      <button id="btn-toggle" class="cp-toggle ${mode === "edit" ? "is-edit" : "is-passthrough"}">
-        <span class="cp-toggle-icon">${toggleIcon}</span>
-        <span class="cp-toggle-text">${toggleLabel}</span>
-      </button>
+      <div class="cp-header" data-tauri-drag-region>
+        <span class="cp-title" data-tauri-drag-region>N-Top</span>
+        <button id="btn-close" class="cp-close" title="收起面板（Esc）">✕</button>
+      </div>
 
-      <div class="cp-row-item">
-        <div class="cp-row-head">
-          <span class="cp-row-title">字号</span>
-          <span class="cp-row-value" id="font-val">${settings.font_size}</span>
+      <div class="cp-pinned">
+        <button id="btn-toggle" class="cp-toggle ${mode === "edit" ? "is-edit" : "is-passthrough"}">
+          <span class="cp-toggle-icon">${toggleIcon}</span>
+          <span class="cp-toggle-text">${toggleLabel}</span>
+        </button>
+      </div>
+
+      <div class="cp-body">
+        <div class="cp-row-item">
+          <div class="cp-row-head">
+            <span class="cp-row-title">字号</span>
+            <span class="cp-row-value" id="font-val">${settings.font_size}</span>
+          </div>
+          <input type="range" id="slider-font" min="12" max="48" value="${settings.font_size}" class="cp-range" />
         </div>
-        <input type="range" id="slider-font" min="12" max="48" value="${settings.font_size}" class="cp-range" />
-      </div>
 
-      <div class="cp-row-item">
-        <div class="cp-row-head">
-          <span class="cp-row-title">背景透明度</span>
-          <span class="cp-row-value" id="alpha-val">${Math.round(settings.bg_alpha * 100)}<small>%</small></span>
+        <div class="cp-row-item">
+          <div class="cp-row-head">
+            <span class="cp-row-title">背景透明度</span>
+            <span class="cp-row-value" id="alpha-val">${Math.round(settings.bg_alpha * 100)}<small>%</small></span>
+          </div>
+          <input type="range" id="slider-alpha" min="0" max="100" value="${Math.round(settings.bg_alpha * 100)}" class="cp-range" />
         </div>
-        <input type="range" id="slider-alpha" min="0" max="100" value="${Math.round(settings.bg_alpha * 100)}" class="cp-range" />
-      </div>
 
-      <div class="cp-row-item">
-        <div class="cp-row-head">
-          <span class="cp-row-title">文字闪亮间隔</span>
-          <span class="cp-row-value" id="flash-interval-val">${formatFlashInterval(settings.text_flash_interval_seconds)}</span>
+        <div class="cp-row-item">
+          <div class="cp-row-head">
+            <span class="cp-row-title">文字闪亮间隔</span>
+            <span class="cp-row-value" id="flash-interval-val">${formatFlashInterval(settings.text_flash_interval_seconds)}</span>
+          </div>
+          <input type="range" id="slider-flash-interval" min="5" max="600" step="5" value="${settings.text_flash_interval_seconds}" class="cp-range" />
         </div>
-        <input type="range" id="slider-flash-interval" min="5" max="600" step="5" value="${settings.text_flash_interval_seconds}" class="cp-range" />
-      </div>
 
-      <div class="cp-row-item cp-inline">
-        <div class="cp-inline-label">
-          <span class="cp-row-title">字体颜色</span>
-          <span class="cp-color-text" id="color-label">${settings.font_color}</span>
+        <div class="cp-row-item cp-inline">
+          <div class="cp-inline-label">
+            <span class="cp-row-title">字体颜色</span>
+            <span class="cp-color-text" id="color-label">${settings.font_color}</span>
+          </div>
+          <label id="font-swatch" class="cp-swatch" style="--swatch-color: ${settings.font_color}">
+            <input type="color" id="picker-color" value="${settings.font_color}" />
+          </label>
         </div>
-        <label id="font-swatch" class="cp-swatch" style="--swatch-color: ${settings.font_color}">
-          <input type="color" id="picker-color" value="${settings.font_color}" />
-        </label>
-      </div>
 
-      <div class="cp-row-item cp-inline">
-        <div class="cp-inline-label">
-          <span class="cp-row-title">背景颜色</span>
-          <span class="cp-color-text" id="bg-color-label">${settings.bg_color}</span>
+        <div class="cp-row-item cp-inline">
+          <div class="cp-inline-label">
+            <span class="cp-row-title">背景颜色</span>
+            <span class="cp-color-text" id="bg-color-label">${settings.bg_color}</span>
+          </div>
+          <label id="bg-swatch" class="cp-swatch" style="--swatch-color: ${settings.bg_color}">
+            <input type="color" id="picker-bg-color" value="${settings.bg_color}" />
+          </label>
         </div>
-        <label id="bg-swatch" class="cp-swatch" style="--swatch-color: ${settings.bg_color}">
-          <input type="color" id="picker-bg-color" value="${settings.bg_color}" />
-        </label>
-      </div>
 
-      <div class="cp-row-item cp-inline">
-        <span class="cp-row-title">文字描边</span>
-        <label class="cp-switch">
-          <input type="checkbox" id="check-stroke" ${settings.text_stroke ? "checked" : ""} />
-          <span class="cp-switch-track"></span>
-        </label>
-      </div>
-
-      <div class="cp-row-item cp-inline">
-        <div class="cp-inline-label">
-          <span class="cp-row-title">仅显示第一段</span>
-          <span class="cp-tip">只显示第一个换行符之前的文本</span>
+        <div class="cp-row-item cp-inline">
+          <span class="cp-row-title">文字描边</span>
+          <label class="cp-switch">
+            <input type="checkbox" id="check-stroke" ${settings.text_stroke ? "checked" : ""} />
+            <span class="cp-switch-track"></span>
+          </label>
         </div>
-        <label class="cp-switch">
-          <input type="checkbox" id="check-first-paragraph" ${settings.show_first_paragraph ? "checked" : ""} />
-          <span class="cp-switch-track"></span>
-        </label>
-      </div>
 
-      <div class="cp-row-item cp-inline">
-        <div class="cp-inline-label">
-          <span class="cp-row-title">在程序坞显示</span>
-          <span class="cp-tip">关闭则仅在菜单栏显示</span>
+        <div class="cp-row-item cp-inline">
+          <div class="cp-inline-label">
+            <span class="cp-row-title">仅显示第一段</span>
+            <span class="cp-tip">只显示第一个换行符之前的文本</span>
+          </div>
+          <label class="cp-switch">
+            <input type="checkbox" id="check-first-paragraph" ${settings.show_first_paragraph ? "checked" : ""} />
+            <span class="cp-switch-track"></span>
+          </label>
         </div>
-        <label class="cp-switch">
-          <input type="checkbox" id="check-dock" ${settings.show_in_dock ? "checked" : ""} />
-          <span class="cp-switch-track"></span>
-        </label>
-      </div>
 
-      <div class="cp-row-item cp-inline">
-        <div class="cp-inline-label">
-          <span class="cp-row-title">开机启动</span>
-          <span class="cp-tip" id="autostart-tip">${autoStartEnabled ? "登录 macOS 后自动启动 N-Top" : "关闭则不会随系统启动"}</span>
+        <div class="cp-row-item cp-inline">
+          <div class="cp-inline-label">
+            <span class="cp-row-title">在程序坞显示</span>
+            <span class="cp-tip">关闭则仅在菜单栏显示</span>
+          </div>
+          <label class="cp-switch">
+            <input type="checkbox" id="check-dock" ${settings.show_in_dock ? "checked" : ""} />
+            <span class="cp-switch-track"></span>
+          </label>
         </div>
-        <label class="cp-switch">
-          <input type="checkbox" id="check-autostart" ${autoStartEnabled ? "checked" : ""} />
-          <span class="cp-switch-track"></span>
-        </label>
-      </div>
 
-      <div class="cp-row-item">
-        <div class="cp-row-head">
-          <span class="cp-row-title">全局热键</span>
+        <div class="cp-row-item cp-inline">
+          <div class="cp-inline-label">
+            <span class="cp-row-title">开机启动</span>
+            <span class="cp-tip" id="autostart-tip">${autoStartEnabled ? "登录 macOS 后自动启动 N-Top" : "关闭则不会随系统启动"}</span>
+          </div>
+          <label class="cp-switch">
+            <input type="checkbox" id="check-autostart" ${autoStartEnabled ? "checked" : ""} />
+            <span class="cp-switch-track"></span>
+          </label>
         </div>
-        <input type="text" id="input-hotkey" value="${settings.hotkey}" class="cp-hotkey-input" placeholder="按下组合键…" readonly />
-        <span class="cp-tip">点击后按下组合键 · Esc 取消</span>
+
+        <div class="cp-row-item">
+          <div class="cp-row-head">
+            <span class="cp-row-title">全局热键</span>
+          </div>
+          <input type="text" id="input-hotkey" value="${settings.hotkey}" class="cp-hotkey-input" placeholder="按下组合键…" readonly />
+          <span class="cp-tip">点击后按下组合键 · Esc 取消</span>
+        </div>
+
       </div>
 
-      <p class="cp-foot">编辑态 ⌘ + 拖动 = 移动窗口</p>
+      <div class="cp-footer">
+        <div class="cp-footer-row">
+          <button id="btn-history" class="cp-history-btn">历史记录</button>
+          <button id="btn-quit" class="cp-quit">退出 N-Top</button>
+        </div>
+
+        <p class="cp-foot">编辑态 ⌘ + 拖动 = 移动窗口</p>
+      </div>
     </div>
   `;
 
@@ -163,6 +180,7 @@ async function initControlPanel(): Promise<void> {
   const checkStroke = document.getElementById("check-stroke") as HTMLInputElement;
   const checkFirstParagraph = document.getElementById("check-first-paragraph") as HTMLInputElement;
   const inputHotkey = document.getElementById("input-hotkey") as HTMLInputElement;
+  const btnHistory = document.getElementById("btn-history") as HTMLButtonElement;
 
   function updateToggle() {
     const isEdit = mode === "edit";
@@ -206,6 +224,8 @@ async function initControlPanel(): Promise<void> {
   });
 
   pickerColor.addEventListener("input", async () => {
+    // 系统取色器是原生弹窗，会抢走焦点，先声明正在交互
+    keepPanelOpen();
     settings.font_color = pickerColor.value;
     colorLabel.textContent = pickerColor.value;
     if (swatchLabel) swatchLabel.style.setProperty("--swatch-color", pickerColor.value);
@@ -213,6 +233,7 @@ async function initControlPanel(): Promise<void> {
   });
 
   pickerBgColor.addEventListener("input", async () => {
+    keepPanelOpen();
     settings.bg_color = pickerBgColor.value;
     bgColorLabel.textContent = pickerBgColor.value;
     if (bgSwatchLabel) bgSwatchLabel.style.setProperty("--swatch-color", pickerBgColor.value);
@@ -279,6 +300,8 @@ async function initControlPanel(): Promise<void> {
     e.preventDefault();
 
     if (e.key === "Escape") {
+      // 只取消录制，别顺手把面板也收起来
+      e.stopPropagation();
       inputHotkey.blur();
       return;
     }
@@ -301,6 +324,42 @@ async function initControlPanel(): Promise<void> {
     await invoke("save_settings_cmd", { settings });
     inputHotkey.blur();
   });
+
+  function hidePanel(): void {
+    void invoke("hide_control_panel_cmd");
+  }
+
+  /** 面板正在被操作时，请后端把自动收起再推迟一会儿 */
+  function keepPanelOpen(): void {
+    void invoke("keep_control_panel_open").catch(() => {});
+  }
+
+  document.getElementById("btn-close")?.addEventListener("click", hidePanel);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      hidePanel();
+    }
+  });
+
+  swatchLabel?.addEventListener("pointerdown", keepPanelOpen);
+  bgSwatchLabel?.addEventListener("pointerdown", keepPanelOpen);
+
+  btnHistory.addEventListener("click", () => {
+    // 历史记录是独立窗口，复用同一个实例；切换焦点期间别让面板自动收起
+    keepPanelOpen();
+    void invoke("open_history_window_cmd").catch((error) => {
+      console.error("打开历史记录窗口失败", error);
+    });
+  });
+
+  document.getElementById("btn-quit")?.addEventListener("click", () => {
+    void invoke("quit_app");
+  });
+
+  // 无边框窗口里右键会弹出 WebKit 菜单，屏蔽掉
+  document.addEventListener("contextmenu", (event) => event.preventDefault());
 }
 
 initControlPanel();

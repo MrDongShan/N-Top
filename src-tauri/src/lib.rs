@@ -1,10 +1,32 @@
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{
-    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, UserAttentionType, WebviewWindowBuilder, WindowEvent,
+    Emitter, Manager, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+
+/// 控制面板窗口标签
+const CONTROL_PANEL_LABEL: &str = "control-panel";
+/// 历史记录窗口标签
+const HISTORY_LABEL: &str = "history";
+/// 托盘图标 id，用来查图标在菜单栏上的位置
+const TRAY_ID: &str = "ntop-tray";
+
+/// 控制面板可见区域尺寸（不含四周留给 CSS 投影的透明边）
+const PANEL_WIDTH: f64 = 320.0;
+/// 面板内容一屏放下（headless 实测：正文 613 + 头部/常驻区 155）
+const PANEL_HEIGHT: f64 = 770.0;
+/// 窗口四周的透明边，避免 CSS 投影被窗口边界裁掉
+const PANEL_INSET: f64 = 10.0;
+/// 面板顶部与菜单栏图标之间的间距
+const PANEL_TRAY_GAP: f64 = 6.0;
+/// 失焦后先等这么久再判断，让焦点事件落地
+const PANEL_AUTOHIDE_DELAY: Duration = Duration::from_millis(180);
+/// 鼠标停在浮窗上时，最多再多等这么久
+const PANEL_AUTOHIDE_MAX_WAIT: Duration = Duration::from_secs(10);
+/// 前端声明的「正在交互」保护时长（系统取色器这类原生弹窗会抢走焦点）
+const PANEL_KEEP_ALIVE: Duration = Duration::from_millis(2500);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum OverlayMode {
@@ -52,6 +74,8 @@ pub struct AppState {
     pub mode: Mutex<OverlayMode>,
     pub settings: Mutex<AppSettings>,
     pub mouse_in_overlay: Mutex<bool>,
+    /// 控制面板「请勿自动收起」的截止时间
+    pub panel_keep_alive: Mutex<Option<Instant>>,
 }
 
 fn settings_path(app: &tauri::AppHandle) -> std::path::PathBuf {
@@ -291,62 +315,181 @@ fn toggle_mode(app: &tauri::AppHandle) {
     set_mode(app, next);
 }
 
-fn show_control_panel(app: &tauri::AppHandle) {
-    // 打开控制窗口时浮窗默认进入编辑态，保证面板按钮与实际状态一致
-    set_mode(app, OverlayMode::Edit);
+/// 托盘图标在菜单栏上的位置（物理像素）
+fn tray_rect(app: &tauri::AppHandle) -> Option<(f64, f64, f64, f64)> {
+    let tray = app.tray_by_id(TRAY_ID)?;
+    let rect = tray.rect().ok().flatten()?;
+    let pos = rect.position.to_physical::<f64>(1.0);
+    let size = rect.size.to_physical::<f64>(1.0);
+    Some((pos.x, pos.y, size.width, size.height))
+}
 
-    if let Some(window) = app.get_webview_window("control-panel") {
-        let _ = app.show();
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_always_on_top(true);
-        let _ = window.request_user_attention(Some(UserAttentionType::Critical));
-        let _ = window.set_focus();
-    } else {
-        match WebviewWindowBuilder::new(
-            app,
-            "control-panel",
-            tauri::WebviewUrl::App("index.html#/control-panel".into()),
-        )
-        .title("N-Top 控制面板")
-        .inner_size(320.0, 840.0)
-        .min_inner_size(320.0, 840.0)
-        .resizable(true)
-        .decorations(true)
-        .always_on_top(true)
-        .visible(true)
-        .build()
-        {
-            Ok(window) => {
-                let _ = window.set_focus();
-            }
-            Err(e) => eprintln!("创建控制面板失败: {}", e),
+/// 懒创建控制面板：无边框透明浮窗，样式由 CSS 负责
+fn ensure_control_panel(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(window) = app.get_webview_window(CONTROL_PANEL_LABEL) {
+        return Some(window);
+    }
+
+    match WebviewWindowBuilder::new(
+        app,
+        CONTROL_PANEL_LABEL,
+        tauri::WebviewUrl::App("index.html#/control-panel".into()),
+    )
+    .title("N-Top")
+    .inner_size(PANEL_WIDTH + PANEL_INSET * 2.0, PANEL_HEIGHT + PANEL_INSET * 2.0)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .build()
+    {
+        Ok(window) => Some(window),
+        Err(e) => {
+            eprintln!("创建控制面板失败: {}", e);
+            None
         }
     }
 }
 
+/// 把面板贴到菜单栏图标正下方，并夹在当前显示器的可视范围内
+fn position_control_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let Some((tray_x, tray_y, tray_w, tray_h)) = tray_rect(app) else {
+        return;
+    };
+
+    let win_w = PANEL_WIDTH + PANEL_INSET * 2.0;
+    let win_h = PANEL_HEIGHT + PANEL_INSET * 2.0;
+
+    let mut x = tray_x + tray_w / 2.0 - win_w / 2.0;
+    let mut y = tray_y + tray_h + PANEL_TRAY_GAP - PANEL_INSET;
+
+    // 托盘图标贴着屏幕右边缘，靠边的屏幕要夹回来
+    if let Ok(Some(monitor)) = app.monitor_from_point(tray_x, tray_y) {
+        let m_pos = monitor.position();
+        let m_size = monitor.size();
+        let (min_x, min_y) = (m_pos.x as f64, m_pos.y as f64);
+        let max_x = min_x + m_size.width as f64 - win_w;
+        let max_y = min_y + m_size.height as f64 - win_h;
+        x = x.clamp(min_x, max_x.max(min_x));
+        y = y.clamp(min_y, max_y.max(min_y));
+    }
+
+    let _ = window.set_position(tauri::PhysicalPosition::new(
+        x.round() as i32,
+        y.round() as i32,
+    ));
+}
+
+fn open_control_panel(app: &tauri::AppHandle) {
+    let Some(window) = ensure_control_panel(app) else {
+        return;
+    };
+
+    // 只把焦点交给面板，不动浮窗的编辑/穿透状态
+    position_control_panel(app, &window);
+    let _ = app.show();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn hide_control_panel(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(CONTROL_PANEL_LABEL) {
+        let _ = window.hide();
+    }
+
+    let state = app.state::<AppState>();
+    *state.panel_keep_alive.lock().unwrap() = None;
+}
+
+fn toggle_control_panel(app: &tauri::AppHandle) {
+    let visible = app
+        .get_webview_window(CONTROL_PANEL_LABEL)
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+
+    if visible {
+        hide_control_panel(app);
+    } else {
+        open_control_panel(app);
+    }
+}
+
+/// 历史记录弹窗：复用同一个窗口实例，标题栏自带的关闭按钮关掉后下次重建
 fn show_history_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("history") {
+    if let Some(window) = app.get_webview_window(HISTORY_LABEL) {
         let _ = app.show();
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_always_on_top(true);
-        let _ = window.request_user_attention(Some(UserAttentionType::Critical));
         let _ = window.set_focus();
-    } else {
-        let _ = WebviewWindowBuilder::new(
-            app,
-            "history",
-            tauri::WebviewUrl::App("index.html#/history".into()),
-        )
-        .title("N-Top 历史记录")
-        .inner_size(360.0, 480.0)
-        .resizable(true)
-        .decorations(true)
-        .always_on_top(true)
-        .visible(true)
-        .build();
+        return;
     }
+
+    if let Err(e) = WebviewWindowBuilder::new(
+        app,
+        HISTORY_LABEL,
+        tauri::WebviewUrl::App("index.html#/history".into()),
+    )
+    .title("N-Top 历史记录")
+    .inner_size(360.0, 480.0)
+    .resizable(true)
+    .always_on_top(true)
+    .visible(true)
+    .build()
+    {
+        eprintln!("创建历史记录窗口失败: {}", e);
+    }
+}
+
+fn keep_alive_active(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let guard = state.panel_keep_alive.lock().unwrap();
+    guard.is_some_and(|deadline| Instant::now() < deadline)
+}
+
+/// 面板失焦后判断要不要自动收起。
+/// 光标在浮窗上、或浮窗正在编辑（本应用窗口仍持有焦点）时保持展开。
+fn spawn_control_panel_autohide(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let started = Instant::now();
+
+        loop {
+            std::thread::sleep(PANEL_AUTOHIDE_DELAY);
+
+            let Some(window) = app.get_webview_window(CONTROL_PANEL_LABEL) else {
+                return;
+            };
+            if !window.is_visible().unwrap_or(false) {
+                return;
+            }
+
+            let app_focused = app
+                .webview_windows()
+                .values()
+                .any(|w| w.is_focused().unwrap_or(false));
+            if app_focused {
+                return;
+            }
+
+            if keep_alive_active(&app) {
+                continue;
+            }
+
+            let hovering_overlay = get_mouse_position()
+                .is_some_and(|(mx, my)| is_point_in_overlay(&app, mx, my));
+            if hovering_overlay && started.elapsed() < PANEL_AUTOHIDE_MAX_WAIT {
+                continue;
+            }
+
+            hide_control_panel(&app);
+            return;
+        }
+    });
 }
 
 #[tauri::command]
@@ -413,6 +556,31 @@ fn is_mouse_in_overlay(app: tauri::AppHandle) -> bool {
         return false;
     };
     is_point_in_overlay(&app, mx, my)
+}
+
+/// 由面板自己的 ✕ / Esc 触发收起
+#[tauri::command]
+fn hide_control_panel_cmd(app: tauri::AppHandle) {
+    hide_control_panel(&app);
+}
+
+/// 面板里的「历史记录」，开在独立弹窗里
+#[tauri::command]
+fn open_history_window_cmd(app: tauri::AppHandle) {
+    show_history_window(&app);
+}
+
+/// 面板里的「退出 N-Top」
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+/// 面板正在交互（如打开系统取色器）时，请自动收起逻辑再等一会儿
+#[tauri::command]
+fn keep_control_panel_open(app: tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    *state.panel_keep_alive.lock().unwrap() = Some(Instant::now() + PANEL_KEEP_ALIVE);
 }
 
 #[derive(serde::Serialize)]
@@ -505,11 +673,11 @@ pub fn run() {
                 .build(),
         )
         .on_window_event(|window, event| {
-            // 控制窗口关闭后，浮窗回到穿透态
-            if window.label() == "control-panel"
-                && matches!(event, WindowEvent::CloseRequested { .. })
+            // 失焦（点到别的 App，或点到浮窗上编辑）后延迟判断是否收起
+            if window.label() == CONTROL_PANEL_LABEL
+                && matches!(event, WindowEvent::Focused(false))
             {
-                set_mode(window.app_handle(), OverlayMode::PassThrough);
+                spawn_control_panel_autohide(window.app_handle().clone());
             }
         })
         .setup(|app| {
@@ -520,6 +688,7 @@ pub fn run() {
                 mode: Mutex::new(OverlayMode::PassThrough),
                 settings: Mutex::new(settings),
                 mouse_in_overlay: Mutex::new(false),
+                panel_keep_alive: Mutex::new(None),
             });
 
             // Set overlay window position from saved settings
@@ -546,37 +715,19 @@ pub fn run() {
                 });
             }
 
-            // Build tray menu
-            let toggle_item =
-                MenuItem::with_id(app, "toggle", "切换编辑/穿透", true, None::<&str>)?;
-            let panel_item = MenuItem::with_id(app, "panel", "打开控制面板", true, None::<&str>)?;
-            let history_item = MenuItem::with_id(app, "history", "历史记录", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出 N-Top", true, None::<&str>)?;
-            let menu =
-                Menu::with_items(app, &[&toggle_item, &panel_item, &history_item, &quit_item])?;
-
-            TrayIconBuilder::new()
+            // 不挂菜单：点图标就是开 / 关控制面板
+            TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
                 .tooltip("N-Top 置顶文本浮层")
-                .on_menu_event(move |app_handle, event| match event.id.as_ref() {
-                    "toggle" => toggle_mode(app_handle),
-                    "panel" => show_control_panel(app_handle),
-                    "history" => show_history_window(app_handle),
-                    "quit" => {
-                        app_handle.exit(0);
-                    }
-                    _ => {}
-                })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
+                        button: MouseButton::Left | MouseButton::Right,
                         button_state: MouseButtonState::Up,
                         ..
                     } = event
                     {
                         let app_handle = tray.app_handle();
-                        show_control_panel(app_handle);
+                        toggle_control_panel(app_handle);
                     }
                 })
                 .build(app)?;
@@ -611,6 +762,10 @@ pub fn run() {
             set_overlay_mode,
             get_mode,
             is_mouse_in_overlay,
+            hide_control_panel_cmd,
+            keep_control_panel_open,
+            open_history_window_cmd,
+            quit_app,
             set_dock_visibility,
             get_history,
         ])
