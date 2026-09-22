@@ -524,8 +524,8 @@ fn keep_alive_active(app: &tauri::AppHandle) -> bool {
     guard.is_some_and(|deadline| Instant::now() < deadline)
 }
 
-/// 面板失焦后判断要不要自动收起。
-/// 光标在浮窗上、或浮窗正在编辑（本应用窗口仍持有焦点）时保持展开。
+/// 判断面板要不要自动收起：任何窗口失焦后都会调用一次。
+/// 光标在浮窗上、或本应用仍有窗口持有焦点（例如浮窗正在编辑）时保持展开。
 fn spawn_control_panel_autohide(app: tauri::AppHandle) {
     let generation = *app.state::<AppState>().panel_generation.lock().unwrap();
 
@@ -752,10 +752,11 @@ pub fn run() {
                 .build(),
         )
         .on_window_event(|window, event| {
-            // 失焦（点到别的 App，或点到浮窗上编辑）后延迟判断是否收起
-            if window.label() == CONTROL_PANEL_LABEL
-                && matches!(event, WindowEvent::Focused(false))
-            {
+            // 失焦后延迟判断是否收起。不能只听面板自己的失焦：在浮窗编辑态下
+            // 打开面板时，先失焦的是面板、而本应用仍有窗口持有焦点，这时判断会
+            // 直接放弃；用户随后（热键切回穿透并）点到别的 App，面板收不到任何
+            // 失焦事件，就会一直挂在那里。所以浮窗失焦同样要重新判断一次。
+            if matches!(event, WindowEvent::Focused(false)) {
                 spawn_control_panel_autohide(window.app_handle().clone());
             }
         })
