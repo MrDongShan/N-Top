@@ -29,6 +29,16 @@ const PANEL_AUTOHIDE_MAX_WAIT: Duration = Duration::from_secs(10);
 /// 前端声明的「正在交互」保护时长（系统取色器这类原生弹窗会抢走焦点）
 const PANEL_KEEP_ALIVE: Duration = Duration::from_millis(2500);
 
+/// 小鹤双拼键位图窗口标签
+const KEYMAP_LABEL: &str = "keymap";
+/// 键位图尺寸（逻辑点），与 styles.css 里 .km 的键盘网格一一对应
+const KEYMAP_WIDTH: f64 = 444.0;
+const KEYMAP_HEIGHT: f64 = 248.0;
+/// 键位图圆角：必须与 styles.css 的 .km 一致
+const KEYMAP_RADIUS: f64 = 14.0;
+/// 鼠标停在图标上多久才弹键位图：太短会「路过就闪」，太长会像没反应
+const KEYMAP_DWELL: Duration = Duration::from_millis(220);
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum OverlayMode {
     Edit,
@@ -81,6 +91,8 @@ pub struct AppState {
     pub panel_open: Mutex<bool>,
     /// 每次开/关都自增，用来让更早排队的自动收起失效
     pub panel_generation: Mutex<u64>,
+    /// 键位图的悬停延迟世代号：鼠标移开或点击后自增，作废还没到点的弹出
+    pub keymap_generation: Mutex<u64>,
 }
 
 fn settings_path(app: &tauri::AppHandle) -> std::path::PathBuf {
@@ -390,16 +402,121 @@ fn ensure_control_panel(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> 
     }
 }
 
-/// 把面板贴到菜单栏图标正下方，并夹在图标所在显示器的可视范围内。
+/// 键位图窗口：同样是毛玻璃浮窗，但**永不接受焦点**。
+///
+/// `focusable(false)` 让窗口的 canBecomeKeyWindow 返回 false，于是 show() 走的
+/// makeKeyAndOrderFront 只会把它排到前面，不会变成 key window、也不会 activate
+/// 本 App —— 鼠标扫过菜单栏时，下面正在打字的 App 不会被打断。
+/// 鼠标事件整体穿透：既不会挡住图标点击，也不会出现「弹窗盖住图标 → 触发移出
+/// → 收起 → 又移入」的闪烁死循环。
+fn ensure_keymap_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(window) = app.get_webview_window(KEYMAP_LABEL) {
+        return Some(window);
+    }
+
+    match WebviewWindowBuilder::new(
+        app,
+        KEYMAP_LABEL,
+        tauri::WebviewUrl::App("index.html#/keymap".into()),
+    )
+    .title("小鹤双拼 · 键位图")
+    .inner_size(KEYMAP_WIDTH, KEYMAP_HEIGHT)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .decorations(false)
+    .transparent(true)
+    .focusable(false)
+    .effects(
+        EffectsBuilder::new()
+            .effect(Effect::Popover)
+            .state(EffectState::Active)
+            .radius(KEYMAP_RADIUS)
+            .build(),
+    )
+    .theme(Some(tauri::Theme::Light))
+    .shadow(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible_on_all_workspaces(true)
+    .visible(false)
+    .build()
+    {
+        Ok(window) => {
+            let _ = window.set_ignore_cursor_events(true);
+            Some(window)
+        }
+        Err(e) => {
+            eprintln!("创建键位图窗口失败: {}", e);
+            None
+        }
+    }
+}
+
+fn show_keymap(app: &tauri::AppHandle) {
+    // 面板开着的时候不弹：否则点开面板、鼠标还在图标上时会顶出来一层
+    if *app.state::<AppState>().panel_open.lock().unwrap() {
+        return;
+    }
+
+    let Some(window) = ensure_keymap_window(app) else {
+        return;
+    };
+
+    // 每次悬停都按当前图标位置重算（换显示器、菜单栏图标被挤动都能跟上）
+    if let Some(pos) = below_tray_position(app, KEYMAP_WIDTH, KEYMAP_HEIGHT) {
+        let _ = window.set_position(pos);
+    }
+    let _ = window.set_ignore_cursor_events(true);
+    if !window.is_visible().unwrap_or(false) {
+        let _ = window.show();
+    }
+}
+
+/// 收起键位图，并作废还在延迟中的弹出
+fn hide_keymap(app: &tauri::AppHandle) {
+    *app.state::<AppState>().keymap_generation.lock().unwrap() += 1;
+    if let Some(window) = app.get_webview_window(KEYMAP_LABEL) {
+        let _ = window.hide();
+    }
+}
+
+/// 鼠标停在图标上：等 KEYMAP_DWELL 再弹。期间鼠标移开或点了图标，
+/// 世代号会变，这个延迟就自己作废，不会「移开了还冒出来」。
+fn spawn_keymap_preview(app: tauri::AppHandle) {
+    let generation = {
+        let state = app.state::<AppState>();
+        let mut generation = state.keymap_generation.lock().unwrap();
+        *generation += 1;
+        *generation
+    };
+
+    std::thread::spawn(move || {
+        std::thread::sleep(KEYMAP_DWELL);
+
+        // 还没到点就被移开 / 点击 / 面板打开，直接放弃
+        if *app.state::<AppState>().keymap_generation.lock().unwrap() != generation {
+            return;
+        }
+
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || show_keymap(&handle));
+    });
+}
+
+/// 把 `width × height` 的窗口贴到菜单栏图标正下方，并夹在图标所在显示器的
+/// 可视范围内，返回可以直接交给 set_position 的逻辑点坐标。面板和键位图共用。
 ///
 /// 托盘 rect 和 Monitor::position/size 都是「逻辑点 × 该屏缩放」的物理像素，
 /// 所以先在这一套坐标里算，最后除以图标所在显示器的缩放换回逻辑点再设位置。
 /// 直接把这套物理值交给 set_position 会被 tao 用「窗口当前所在显示器」的缩放
 /// 再解释一次，两台显示器缩放不同时就会算到屏幕外面，表现为点好几次才出来。
-fn position_control_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
-    let Some((tray_x, tray_y, tray_w, tray_h)) = tray_rect(app) else {
-        return;
-    };
+fn below_tray_position(
+    app: &tauri::AppHandle,
+    width: f64,
+    height: f64,
+) -> Option<tauri::LogicalPosition<f64>> {
+    let (tray_x, tray_y, tray_w, tray_h) = tray_rect(app)?;
 
     let icon_center_x = tray_x + tray_w / 2.0;
     let icon_bottom = tray_y + tray_h;
@@ -411,9 +528,9 @@ fn position_control_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow)
         .unwrap_or(1.0)
         .max(1.0);
 
-    // 面板尺寸（逻辑点）换算到同一套物理像素
-    let win_w = PANEL_WIDTH * scale;
-    let win_h = PANEL_HEIGHT * scale;
+    // 窗口尺寸（逻辑点）换算到同一套物理像素
+    let win_w = width * scale;
+    let win_h = height * scale;
 
     let mut x = icon_center_x - win_w / 2.0;
     let mut y = icon_bottom + PANEL_TRAY_GAP * scale;
@@ -429,10 +546,19 @@ fn position_control_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow)
         y = y.clamp(min_y, max_y.max(min_y));
     }
 
-    let _ = window.set_position(tauri::LogicalPosition::new(x / scale, y / scale));
+    Some(tauri::LogicalPosition::new(x / scale, y / scale))
+}
+
+fn position_control_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    if let Some(pos) = below_tray_position(app, PANEL_WIDTH, PANEL_HEIGHT) {
+        let _ = window.set_position(pos);
+    }
 }
 
 fn open_control_panel(app: &tauri::AppHandle) {
+    // 键位图是悬停提示，面板才是正主；开面板前先收掉，避免两层同屏
+    hide_keymap(app);
+
     let Some(window) = ensure_control_panel(app) else {
         return;
     };
@@ -771,6 +897,7 @@ pub fn run() {
                 panel_keep_alive: Mutex::new(None),
                 panel_open: Mutex::new(false),
                 panel_generation: Mutex::new(0),
+                keymap_generation: Mutex::new(0),
             });
 
             // Set overlay window position from saved settings
@@ -797,22 +924,39 @@ pub fn run() {
                 });
             }
 
-            // 不挂菜单：点图标就是开 / 关控制面板
+            // 不挂菜单：点图标就是开 / 关控制面板；悬停则弹小鹤双拼键位图
             TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("N-Top 置顶文本浮层")
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left | MouseButton::Right,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app_handle = tray.app_handle();
-                        toggle_control_panel(app_handle);
+                    let app_handle = tray.app_handle().clone();
+                    match event {
+                        // 移入先记一笔，停留够了才弹
+                        TrayIconEvent::Enter { .. } => spawn_keymap_preview(app_handle),
+                        // 移开立刻收，并作废还没到点的延迟
+                        TrayIconEvent::Leave { .. } => hide_keymap(&app_handle),
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left | MouseButton::Right,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } => {
+                            hide_keymap(&app_handle);
+                            toggle_control_panel(&app_handle);
+                        }
+                        _ => {}
                     }
                 })
                 .build(app)?;
+
+            // 键位图窗口先建好藏着：悬停是毫秒级动作，等第一次移入再建会白闪一帧
+            let warm_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1200));
+                let inner = warm_handle.clone();
+                let _ = warm_handle.run_on_main_thread(move || {
+                    let _ = ensure_keymap_window(&inner);
+                });
+            });
 
             // Register global hotkey
             if let Err(e) = register_hotkey(&app.handle(), &hotkey) {

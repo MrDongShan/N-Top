@@ -49,6 +49,8 @@ if (winLabel === "control-panel" || location.hash === "#/control-panel") {
   import("./control-panel.ts");
 } else if (winLabel === "history" || location.hash === "#/history") {
   import("./history.ts");
+} else if (winLabel === "keymap" || location.hash === "#/keymap") {
+  import("./keymap.ts");
 } else {
   initOverlay();
 }
